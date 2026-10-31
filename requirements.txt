@@ -1,0 +1,26 @@
+# ==================== 核心运行时依赖 ====================
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+numpy==1.26.4
+# 注意: 嵌入式 Linux 务必使用 headless 版，避免缺失 libGL.so.1 桌面图形库
+opencv-python-headless==4.10.0.84
+Pillow==10.4.0
+onnxruntime==1.18.1
+ncnn>=1.0.20240410
+loguru==0.7.2
+pydantic==2.9.0
+pydantic-settings==2.5.0
+aiofiles>=22.0
+gradio==4.44.1
+huggingface_hub==0.25.0
+
+# ==================== 可选依赖说明 ====================
+# 1. 泰山派 RK3566 NPU 加速运行库 (板端推理使用，若环境已有可忽略)
+# pip install rknn-toolkit-lite2
+
+# 2. 国内镜像下载加速工具 (可选)
+# pip install modelscope>=1.15.0
+
+# 3. [仅在 x86_64 PC / Docker 中转换模型使用，板端不支持]
+# pip install rknn-toolkit2

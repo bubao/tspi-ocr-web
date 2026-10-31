@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific - OCR models (large binary files)
+*.onnx
+*.pdmodel
+*.pdiparams
+*.bin
+*.param
+models/
+weights/
+tools/
+
+# Project specific - runtime data
+*.log
+logs/
+tmp/
+temp/
+uploads/
+output/
+results/
+
+# Gradio
+gradio_cached_examples/
+gradio/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/

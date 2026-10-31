@@ -1,0 +1,36 @@
+[Unit]
+Description=泰山派 RK3566 离线 OCR 文字识别服务
+Documentation=https://github.com/taishanpi/ocr-web
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 默认使用普通用户运行 (无需也不建议迁移到 root 目录)
+# 若路径或用户名不同，可在当前目录执行 `sudo ./scripts/install_service.sh` 自动生成安装
+User=neons
+Group=neons
+WorkingDirectory=/home/neons/software/ocr-web
+ExecStart=/home/neons/software/ocr-web/venv/bin/python main.py
+Restart=on-failure
+RestartSec=3s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tspi-ocr
+
+# 资源限制优化 (适配 RK3566 2GB 内存)
+MemoryMax=800M
+CPUQuota=300%
+
+# 环境变量设置 (auto: 优先检测 RKNN NPU，未找到则自动回退 ONNX)
+Environment=PYTHONUNBUFFERED=1
+Environment=OCR_HOST=0.0.0.0
+Environment=OCR_PORT=8002
+Environment=OCR_ENGINE=auto
+
+# 安全策略
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

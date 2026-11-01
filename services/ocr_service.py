@@ -150,6 +150,41 @@ def check_ncnn_available() -> Tuple[bool, str, Dict[str, Path]]:
     return False, "未检测到完整 NCNN 模型文件 (缺少 det/rec param/bin)", {}
 
 
+def check_indra_available() -> Tuple[bool, str, Dict[str, Path]]:
+    """
+    检查系统中是否存在可用的 Indra OCR 模型与 onnxruntime
+    返回: (available: bool, reason: str, model_paths: dict)
+    """
+    try:
+        import onnxruntime
+    except ImportError:
+        return False, "未安装 onnxruntime 运行库", {}
+
+    indra_dir = Path("models/ocr/indra")
+    if not indra_dir.exists():
+        indra_dir = settings.OCR_MODEL_DIR.parent / "indra"
+
+    det_path = indra_dir / "det.onnx"
+    rec_cjk_path = indra_dir / "rec_cjk.onnx"
+    rec_path = indra_dir / "rec.onnx"
+    meta_path = indra_dir / "meta.json"
+
+    if not det_path.exists():
+        return False, f"未检测到 Indra 检测模型: {det_path.name}", {}
+    if not (rec_cjk_path.exists() or rec_path.exists()):
+        return False, "未检测到 Indra 识别模型 (rec_cjk.onnx 或 rec.onnx)", {}
+    if not meta_path.exists():
+        return False, f"未检测到 Indra 字典配置: {meta_path.name}", {}
+
+    return True, "Indra OCR 模型与 ONNX 运行环境已就绪", {
+        "dir": indra_dir,
+        "det": det_path,
+        "rec_cjk": rec_cjk_path if rec_cjk_path.exists() else None,
+        "rec": rec_path if rec_path.exists() else None,
+        "meta": meta_path,
+    }
+
+
 class PPOCRv4BaseEngine(BaseOCR):
     """PP-OCRv4 通用算法逻辑基类 (共享图像前处理、DBNet 轮廓后处理与 CTC 字典解码)"""
 
@@ -789,3 +824,245 @@ class PaddleOCREngine(BaseOCR):
             "engine": self.engine_name,
             "backend": self.backend_name,
         }
+
+
+class IndraOCREngine(BaseOCR):
+    """
+    Indra OCR 引擎 (基于 ONNX Runtime 4核 CPU 并行)
+    特点:
+      - 极致轻量 (检测模型仅 ~390KB，总模型 ~10MB)
+      - 支持中文 (CJK)、英文及 80+ 种全球语言
+      - 纯 Python + ONNXRuntime，支持 RGA 2D 硬件缩放加速
+    """
+
+    def __init__(self, model_dir: Optional[Path] = None):
+        super().__init__()
+        self.model_dir = Path(model_dir) if model_dir else (Path("models/ocr/indra"))
+        self.engine_name = "Indra-OCR"
+        self.backend_name = "ONNX Runtime (CPU 4核)"
+        self.det_sess = None
+        self.rec_sess = None
+        self.vocab_cjk: List[str] = []
+        self.vocab_latin: List[str] = []
+        self.det_long_side = 1024
+
+    def load_model(self):
+        try:
+            import json
+            import onnxruntime as ort
+
+            det_path = self.model_dir / "det.onnx"
+            rec_cjk_path = self.model_dir / "rec_cjk.onnx"
+            rec_path = self.model_dir / "rec.onnx"
+            meta_path = self.model_dir / "meta.json"
+
+            if not det_path.exists():
+                raise FileNotFoundError(f"Indra 检测模型不存在: {det_path}")
+            if not meta_path.exists():
+                raise FileNotFoundError(f"Indra 元数据配置不存在: {meta_path}")
+
+            opts = ort.SessionOptions()
+            opts.intra_op_num_threads = getattr(settings, "ONNX_NUM_THREADS", 4)
+            opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+            logger.info(f"⏳ 正在加载 Indra OCR 模型 (目录: {self.model_dir})...")
+            self.det_sess = ort.InferenceSession(str(det_path), opts, providers=["CPUExecutionProvider"])
+
+            rec_target = rec_cjk_path if rec_cjk_path.exists() else rec_path
+            if not rec_target.exists():
+                raise FileNotFoundError(f"未找到可用 Indra 识别模型: {rec_cjk_path} 或 {rec_path}")
+
+            self.rec_sess = ort.InferenceSession(str(rec_target), opts, providers=["CPUExecutionProvider"])
+
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            if "vocab_cjk" in meta:
+                self.vocab_cjk = json.loads(meta["vocab_cjk"]).get("chars", [])
+            if "vocab" in meta:
+                self.vocab_latin = json.loads(meta["vocab"]).get("chars", [])
+
+            self.det_long_side = int(meta.get("det_long_side", 1024))
+            self._loaded = True
+            logger.info(
+                f"✅ Indra OCR 模型加载成功 (检测: {det_path.name}, 识别: {rec_target.name}, 字典: {len(self.vocab_cjk)} CJK字符)"
+            )
+        except Exception as e:
+            logger.error(f"Indra OCR 模型加载失败: {e}")
+            raise
+
+    def recognize(
+        self,
+        image_input,
+        language: str = "ch",
+        det: bool = True,
+        rec: bool = True,
+        cls: bool = False,
+        use_rga: bool = True,
+    ) -> dict:
+        if not self._loaded:
+            self.load_model()
+
+        start_time = time.perf_counter()
+
+        # 归一化输入图像为 BGR numpy ndarray
+        if isinstance(image_input, (str, Path)):
+            img = cv2.imread(str(image_input))
+        elif isinstance(image_input, dict):
+            if "path" in image_input and image_input["path"]:
+                img = cv2.imread(str(image_input["path"]))
+            elif "array" in image_input and image_input["array"] is not None:
+                img = np.array(image_input["array"])
+            else:
+                img = None
+        elif hasattr(image_input, "convert"):  # PIL.Image
+            img = cv2.cvtColor(np.array(image_input), cv2.COLOR_RGB2BGR)
+        elif isinstance(image_input, np.ndarray):
+            img = image_input
+        else:
+            img = np.array(image_input)
+
+        if img is None or img.size == 0:
+            return {
+                "text": "",
+                "results": [],
+                "processing_time": 0.0,
+                "image_size": {},
+                "engine": self.engine_name,
+                "backend": self.backend_name,
+            }
+
+        if len(img.shape) == 2:
+            gray = img
+            h, w = gray.shape
+        elif img.shape[2] == 4:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+            h, w = gray.shape
+        else:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            h, w = gray.shape
+
+        boxes = []
+        if det:
+            # 检测前处理: 长边缩放到 1024, pad 到 32 倍数, 转为 ink map (1.0 - gray/255.0)
+            scale = self.det_long_side / max(h, w)
+            nh, nw = max(1, round(h * scale)), max(1, round(w * scale))
+            if use_rga:
+                resized_gray = rga_resize_or_fallback(gray, nw, nh)
+            else:
+                interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+                resized_gray = cv2.resize(gray, (nw, nh), interpolation=interp)
+
+            ph = ((nh + 31) // 32) * 32
+            pw = ((nw + 31) // 32) * 32
+            ink = np.zeros((ph, pw), dtype=np.float32)
+            ink[:nh, :nw] = 1.0 - (resized_gray.astype(np.float32) / 255.0)
+
+            # 检测推理
+            out = self.det_sess.run(None, {"x": ink[None, None]})[0][0]
+
+            # 检测后处理: 解码连通域与上下边距距离
+            prob = 1.0 / (1.0 + np.exp(-out[0]))
+            mask = (prob > 0.5).astype(np.uint8)
+            n, lab, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=4)
+            if n > 1:
+                s = 2
+                flat = lab.ravel()
+                keep = flat > 0
+                idx = flat[keep]
+                ys = (np.indices(lab.shape)[0].ravel()[keep].astype(np.float32) + 0.5) * s
+                top = ys - out[1].ravel()[keep]
+                bot = ys + out[2].ravel()[keep]
+                cnt = np.bincount(idx, minlength=n).astype(np.float32)
+                y0_arr = np.bincount(idx, weights=top, minlength=n) / np.maximum(cnt, 1)
+                y1_arr = np.bincount(idx, weights=bot, minlength=n) / np.maximum(cnt, 1)
+
+                for i in range(1, n):
+                    if stats[i, cv2.CC_STAT_AREA] < 3:
+                        continue
+                    lh = max(1.0, y1_arr[i] - y0_arr[i])
+                    ex = min(0.15 * lh, 0.5 * lh)
+                    x0 = max(0.0, (stats[i, cv2.CC_STAT_LEFT] * s - ex) / scale)
+                    x1 = min(float(w), ((stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH]) * s + ex) / scale)
+                    y0 = max(0.0, float(y0_arr[i]) / scale)
+                    y1 = min(float(h), float(y1_arr[i]) / scale)
+                    if x1 > x0 and y1 > y0:
+                        boxes.append([x0, y0, x1, y1])
+
+                # 按自上而下阅读顺序排序
+                boxes.sort(key=lambda b: (b[1], b[0]))
+        else:
+            boxes = [[0.0, 0.0, float(w), float(h)]]
+
+        results = []
+        if rec and boxes:
+            vocab = self.vocab_cjk if self.vocab_cjk else self.vocab_latin
+            for b in boxes:
+                x0, y0, x1, y1 = b
+                line_h = max(1.0, y1 - y0)
+                # 按照 Indra 标准扩充留白
+                iy0 = max(0, int(np.floor(y0 - 0.2 * line_h)))
+                iy1 = min(h, int(np.ceil(y1 + 0.2 * line_h)))
+                ix0 = max(0, int(np.floor(x0 - 0.3 * line_h)))
+                ix1 = min(w, int(np.ceil(x1 + 0.3 * line_h)))
+
+                crop = gray[iy0:iy1, ix0:ix1]
+                if crop.size == 0 or crop.shape[0] < 2 or crop.shape[1] < 2:
+                    continue
+
+                ch, cw = crop.shape
+                tw = max(8, int(round(cw * (32.0 / ch))))
+                tw = ((tw + 7) // 8) * 8
+
+                if use_rga:
+                    resized_crop = rga_resize_or_fallback(crop, tw, 32)
+                else:
+                    resized_crop = cv2.resize(crop, (tw, 32))
+
+                crop_ink = 1.0 - (resized_crop.astype(np.float32) / 255.0)
+                crop_x = crop_ink[None, None, :, :]
+                widths = np.array([tw], dtype=np.int64)
+
+                res = self.rec_sess.run(["ids", "conf", "lengths"], {"x": crop_x, "widths": widths})
+                ids, confs, lens = res[0][0], res[1][0], res[2][0]
+                n_tok = int(lens)
+                seq = ids[:n_tok]
+                keep = (seq != 0) & np.concatenate([[True], seq[1:] != seq[:-1]])
+                valid_ids = seq[keep]
+                text = "".join([vocab[idx - 1] for idx in valid_ids if 0 < idx <= len(vocab)])
+                conf = float(confs[:n_tok][keep].mean()) if keep.any() else 0.0
+
+                if text.strip():
+                    results.append(
+                        {
+                            "bbox": [
+                                float(x0),
+                                float(y0),
+                                float(x1),
+                                float(y0),
+                                float(x1),
+                                float(y1),
+                                float(x0),
+                                float(y1),
+                            ],
+                            "text": text,
+                            "confidence": round(conf, 4),
+                        }
+                    )
+
+        processing_time = round(time.perf_counter() - start_time, 4)
+        full_text = "\n".join(r["text"] for r in results)
+
+        return {
+            "text": full_text,
+            "results": results,
+            "processing_time": processing_time,
+            "image_size": {"width": w, "height": h},
+            "engine": self.engine_name,
+            "backend": self.backend_name,
+        }
+
+    def release(self):
+        self.det_sess = None
+        self.rec_sess = None
+        self._loaded = False
+

@@ -81,6 +81,10 @@ def get_ocr_service(engine: Optional[str] = None):
         from services.ocr_service import PPOCRv4ONNXEngine
 
         svc = PPOCRv4ONNXEngine()
+    elif engine_target == "indra":
+        from services.ocr_service import IndraOCREngine
+
+        svc = IndraOCREngine()
     elif engine_target == "paddle":
         from services.ocr_service import PaddleOCREngine
 

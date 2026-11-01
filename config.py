@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     OCR_MODEL_DIR_RKNN: Path = MODEL_DIR / "ocr" / "ppocrv4-rknn"
 
     # ============ OCR 引擎与模式 ============
-    # 可选: "auto" (智能探测: 优先 RKNN NPU，其次 NCNN FP16，无则回退 ONNX) | "rknn" | "ncnn" | "onnx" | "paddle"
+    # 可选: "auto" (智能探测: 优先 RKNN NPU，其次 NCNN FP16，无则回退 ONNX) | "rknn" | "ncnn" | "onnx" | "indra" | "paddle"
     OCR_ENGINE: str = "auto"
 
     # 预加载模型 (启动时预热，消除首次推理冷启动耗时)

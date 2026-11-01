@@ -6,12 +6,15 @@
      来源: https://huggingface.co/qefro/pp-OCRv5-6-ncnn
   2. PP-OCRv4 (ONNX 原版, ~90MB, CPU 推理约 1.5s)
      来源: https://huggingface.co/monkt/paddleocr-onnx
+  3. Indra OCR (1M 超轻量版, 检测仅 390KB, CJK识别 10MB)
+     来源: https://huggingface.co/datalab-to/indra-ocr
 
 支持参数:
   python scripts/download_models.py              # 默认检查并下载缺少的推荐模型 (优先 NCNN)
   python scripts/download_models.py --ncnn       # 仅下载/检查 PP-OCRv5 NCNN 模型
   python scripts/download_models.py --onnx       # 仅下载/检查 PP-OCRv4 ONNX 模型
-  python scripts/download_models.py --all        # 下载全部模型 (NCNN + ONNX)
+  python scripts/download_models.py --indra      # 仅下载/检查 Indra OCR 模型
+  python scripts/download_models.py --all        # 下载全部模型 (NCNN + ONNX + Indra)
   python scripts/download_models.py --force      # 强制重新下载并覆盖
 """
 
@@ -52,6 +55,17 @@ MODEL_PACKS = {
             "languages/chinese/rec.onnx": "rec.onnx",
             "preprocessing/textline-orientation/PP-LCNet_x1_0_textline_ori.onnx": "cls.onnx",
             "languages/chinese/dict.txt": "dict.txt",
+        },
+    },
+    "indra": {
+        "title": "Indra OCR (1M超轻量模型)",
+        "repo_id": "datalab-to/indra-ocr",
+        "dir": MODEL_ROOT / "indra",
+        "files": {
+            "det.onnx": "det.onnx",
+            "rec_cjk.onnx": "rec_cjk.onnx",
+            "rec.onnx": "rec.onnx",
+            "meta.json": "meta.json",
         },
     },
 }
@@ -126,20 +140,23 @@ def main():
     download_all = "--all" in sys.argv
     only_onnx = "--onnx" in sys.argv
     only_ncnn = "--ncnn" in sys.argv
+    only_indra = "--indra" in sys.argv
 
     print("\n" + "=" * 55)
     print("  📸 泰山派 RK3566 OCR 服务模型下载管理器")
     print("=" * 55)
 
     if download_all:
-        targets = ["ncnn", "onnx"]
+        targets = ["ncnn", "onnx", "indra"]
     elif only_onnx:
         targets = ["onnx"]
     elif only_ncnn:
         targets = ["ncnn"]
+    elif only_indra:
+        targets = ["indra"]
     else:
-        # 默认模式: 优先下载推荐的高性能 NCNN 模型
-        targets = ["ncnn"]
+        # 默认模式: 检查推荐的高性能 NCNN 模型与轻量 Indra 模型
+        targets = ["ncnn", "indra"]
 
     overall_ok = True
     for t in targets:

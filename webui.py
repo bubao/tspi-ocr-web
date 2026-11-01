@@ -92,9 +92,9 @@ def format_annotations(image, results):
         bbox = r.get("bbox", [])
         text = r.get("text", "").strip()
         conf = r.get("confidence", 0.0)
-        # 精简标签展示，避免长串文字生成庞大标签块遮挡原图
-        short_text = (text[:10] + "...") if len(text) > 10 else text
-        label = f"#{i+1} {short_text} ({conf:.0%})" if short_text else f"#{i+1} ({conf:.0%})"
+        # 精简标签展示，置信度前置
+        short_text = (text[:12] + "...") if len(text) > 12 else text
+        label = f"[{conf:.0%}] 行{i+1}: {short_text}" if short_text else f"[{conf:.0%}] 行{i+1}"
 
         if len(bbox) >= 8:
             x_min = int(min(bbox[0], bbox[2], bbox[4], bbox[6]))
@@ -165,6 +165,7 @@ def ocr_recognize_workflow(image, url, input_mode, language, det, rec, cls, engi
         "PP-OCRv5 (NCNN FP16 极速)": "ncnn",
         "PP-OCRv4 (ONNX CPU 4核)": "onnx",
         "PP-OCRv4 (RKNN NPU加速)": "rknn",
+        "Indra OCR (1M超轻量多语言)": "indra",
     }
     engine_param = engine_map.get(engine_choice, "auto")
 
@@ -182,7 +183,7 @@ def ocr_recognize_workflow(image, url, input_mode, language, det, rec, cls, engi
 
     if "error" in result:
         err_msg = result.get("error", "未知错误")
-        return (target_img, []), f"识别失败: {err_msg}", f"❌ 服务端报错: {err_msg}", "{}"
+        return (target_img, []), f"识别失败: {err_msg}", [], f"❌ 服务端报错: {err_msg}", "{}"
 
     # 组装返回数据
     results_list = result.get("results", [])
@@ -190,6 +191,18 @@ def ocr_recognize_workflow(image, url, input_mode, language, det, rec, cls, engi
     full_text = result.get("text", "")
     duration_ms = round(result.get("processing_time", 0) * 1000, 1)
     line_count = len(results_list)
+
+    if results_list:
+        avg_conf = sum(r.get("confidence", 0.0) for r in results_list) / len(results_list)
+        conf_str = f"{avg_conf:.1%}"
+    else:
+        conf_str = "-"
+
+    table_data = []
+    for i, r in enumerate(results_list):
+        c = r.get("confidence", 0.0)
+        status = "🟢 极高" if c >= 0.9 else ("🟡 良好" if c >= 0.7 else "🟠 较低")
+        table_data.append([i + 1, r.get("text", ""), f"{c:.1%}", status])
 
     img_size = result.get("image_size", {})
     w = img_size.get("width", target_img.shape[1] if hasattr(target_img, "shape") else "-")
@@ -201,6 +214,7 @@ def ocr_recognize_workflow(image, url, input_mode, language, det, rec, cls, engi
     metrics_html = (
         f'<div class="metric-container">'
         f'<span class="metric-item">⏱️ 推理耗时: <b>{duration_ms} ms</b></span>'
+        f'<span class="metric-item">🎯 平均置信度: <b>{conf_str}</b></span>'
         f'<span class="metric-item">📝 文本行数: <b>{line_count} 行</b></span>'
         f'<span class="metric-item">📐 图像分辨率: <b>{w}×{h} px</b></span>'
         f'<span class="metric-badge">🟢 {engine_badge}</span>'
@@ -208,7 +222,7 @@ def ocr_recognize_workflow(image, url, input_mode, language, det, rec, cls, engi
     )
 
     json_str = json.dumps(result, ensure_ascii=False, indent=2)
-    return annotated, full_text, metrics_html, json_str
+    return annotated, full_text, table_data, metrics_html, json_str
 
 
 # ============ 统计信息格式化 ============
@@ -327,37 +341,78 @@ def build_interface():
         padding: 16px;
         margin-bottom: 16px;
     }
-    /* 解决标注蒙版与标签遮挡图片问题 */
+    /* 标注蒙版：默认温和显示，避免干扰原图 */
     .image-container .mask {
-        opacity: 0.22 !important;
-        mix-blend-mode: multiply;
-        transition: opacity 0.15s ease-in-out;
+        opacity: 0.28 !important;
+        mix-blend-mode: normal !important;
+        transition: all 0.15s ease-in-out !important;
+        pointer-events: auto !important;
     }
     .image-container:hover .mask {
-        opacity: 0.35 !important;
+        opacity: 0.38 !important;
     }
+    /* 重点：当选中或鼠标悬浮某个图例/标注时，未选中项自动淡化降噪 */
+    .image-container .mask.inactive {
+        opacity: 0.05 !important;
+        filter: grayscale(0.8) !important;
+    }
+    /* 核心高亮：选中的目标区域以鲜亮边框、超高对比度与高亮光晕立体凸显，绝对醒目 */
     .image-container .mask.active {
-        opacity: 0.55 !important;
+        opacity: 1.0 !important;
+        mix-blend-mode: normal !important;
+        filter: drop-shadow(0 0 6px #ef4444) drop-shadow(0 0 2px #dc2626) brightness(1.25) contrast(1.3) !important;
+        outline: 3px solid #ef4444 !important;
+        outline-offset: -1px !important;
+        box-shadow: 0 0 12px rgba(239, 68, 68, 0.8) !important;
+        z-index: 99 !important;
     }
-    /* 图例限制高度并支持内部滚动，禁止遮挡图片 */
+
+    /* 彻底解决图例置信度模糊、字体发虚与对比度不足问题 */
     .legend {
-        max-height: 75px !important;
+        display: flex !important;
+        flex-wrap: wrap !important;
+        gap: 6px !important;
+        padding: 8px 10px !important;
+        background: #f8fafc !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 8px !important;
+        margin-top: 8px !important;
+        max-height: 105px !important;
         overflow-y: auto !important;
-        padding: 4px 6px !important;
-        gap: 4px !important;
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-radius: 6px;
-        margin-top: 6px;
+        position: static !important;
+        z-index: 5 !important;
     }
     .legend-item {
-        font-size: 11px !important;
-        padding: 2px 6px !important;
-        line-height: 1.2 !important;
-        max-width: 180px !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        font-size: 12px !important;
+        font-weight: 700 !important;
+        color: #0f172a !important; /* 纯黑深色文字，告别模糊 */
+        background: #ffffff !important; /* 白色纯净底色 */
+        border: 1.5px solid #94a3b8 !important; /* 清晰外边框 */
+        border-radius: 6px !important;
+        padding: 3px 8px !important;
+        line-height: 1.3 !important;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06) !important;
+        text-shadow: none !important;
+        cursor: pointer !important;
+        max-width: 260px !important;
         overflow: hidden !important;
         text-overflow: ellipsis !important;
         white-space: nowrap !important;
+        transition: all 0.15s ease-in-out !important;
+    }
+    .legend-item:hover, .legend-item:focus {
+        color: #ffffff !important;
+        background: #ef4444 !important; /* 选中时变成醒目红底白字，与图片上的高亮框色彩完美呼应 */
+        border-color: #b91c1c !important;
+        box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.35) !important;
+        transform: scale(1.03) !important;
+    }
+        background: #eff6ff !important;
+        border-color: #3b82f6 !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 2px 6px rgba(59, 130, 246, 0.25) !important;
     }
     """
 
@@ -418,7 +473,13 @@ def build_interface():
                         with gr.Accordion("⚙️ 模型引擎与高级参数设置", open=False):
                             with gr.Row():
                                 engine_choice = gr.Dropdown(
-                                    choices=["智能自动 (优先 RKNN/NCNN)", "PP-OCRv5 (NCNN FP16 极速)", "PP-OCRv4 (ONNX CPU 4核)", "PP-OCRv4 (RKNN NPU加速)"],
+                                    choices=[
+                                        "智能自动 (优先 RKNN/NCNN)",
+                                        "PP-OCRv5 (NCNN FP16 极速)",
+                                        "PP-OCRv4 (ONNX CPU 4核)",
+                                        "PP-OCRv4 (RKNN NPU加速)",
+                                        "Indra OCR (1M超轻量多语言)",
+                                    ],
                                     value="智能自动 (优先 RKNN/NCNN)",
                                     label="🧠 推理模型引擎",
                                     interactive=True,
@@ -450,20 +511,27 @@ def build_interface():
                             """
                         )
 
-                        # 原生客户端标注渲染（纯净框选高亮，原图不被遮挡）
                         annotated_preview = gr.AnnotatedImage(
-                            label="标注可视化 (半透明框选，原图文字清晰可见)",
-                            height=420,
-                            show_legend=False,
+                            show_label=False,
+                            height=380,
+                            show_legend=True,
                         )
 
-                        # 纯文本结果（直接复制）
-                        text_output = gr.Textbox(
-                            label="识别文字结果 (支持直接编辑与一键复制)",
-                            lines=7,
-                            placeholder="识别出的完整文本内容将呈现在这里...",
-                            show_copy_button=True,
-                        )
+                        with gr.Tabs():
+                            with gr.TabItem("📝 识别纯文本"):
+                                text_output = gr.Textbox(
+                                    label="完整文本内容 (支持直接编辑与一键复制)",
+                                    lines=7,
+                                    placeholder="识别出的完整文本内容将呈现在这里...",
+                                    show_copy_button=True,
+                                )
+                            with gr.TabItem("📊 逐行文字与置信度明细"):
+                                conf_table = gr.Dataframe(
+                                    headers=["序号", "识别文字", "置信度", "评估"],
+                                    datatype=["number", "str", "str", "str"],
+                                    label="各文本行置信度详细清单",
+                                    interactive=False,
+                                )
 
                         with gr.Accordion("📋 结构化数据 (JSON)", open=False):
                             json_output = gr.Code(label="包含各检测框 8 点坐标的原始数据", language="json", lines=8)
@@ -489,7 +557,7 @@ def build_interface():
                         rga_checkbox,
                         api_base_input,
                     ],
-                    outputs=[annotated_preview, text_output, metrics_display, json_output],
+                    outputs=[annotated_preview, text_output, conf_table, metrics_display, json_output],
                 )
 
                 clear_btn.click(
@@ -498,10 +566,11 @@ def build_interface():
                         "",
                         None,
                         "",
+                        [],
                         '<div class="metric-container"><span>已清空内容</span></div>',
                         "{}",
                     ),
-                    outputs=[image_input, url_input, annotated_preview, text_output, metrics_display, json_output],
+                    outputs=[image_input, url_input, annotated_preview, text_output, conf_table, metrics_display, json_output],
                 )
 
             # ---- Tab 2: API 开发者对接 ----
@@ -511,7 +580,7 @@ def build_interface():
                     ### 📡 RESTful API 快速集成指南
                     后端接口与 Web UI 共用端口，返回纯 JSON YOLO 标注坐标与文本。
 
-                    **在线交互式文档 (Swagger UI)**: [http://localhost:{settings.PORT}/docs](http://localhost:{settings.PORT}/docs)
+                    👉 <a href="/docs" target="_blank" style="color: #2563eb; font-weight: 600; text-decoration: underline;">在线交互式文档 (Swagger UI): 点击在新标签页打开 /docs ↗</a>
                     """
                 )
 
